@@ -3,33 +3,25 @@ class App < Sinatra::Base
   
   COLLECTION = 'test'
   DB = 'em_benchmark'
-  # SLOW_QUERY_TIME = 1*1000
-  # SLOW_QUERY = "function() { var d = new Date((new Date()).getTime() + #{SLOW_QUERY_TIME}); while (d > (new Date())) { }; return true; }"
   
-  set :pooled_connection, Mongo::Connection.new('localhost', 27017, pool_size: 10, pool_timeout: 2)
-  EM.next_tick do
-    EM.add_periodic_timer(0.5) { puts ">>> Hearbeat @ #{Time.now}" }
-  end
+  set :pooled_connection, Mongo::Connection.new('localhost', 27017, pool_size: 20, pool_timeout: 2)
+  
+  #EM.next_tick do
+  #  EM.add_periodic_timer(0.5) { puts ">>> Hearbeat @ #{Time.now}" }
+  #end
   
   helpers do
     def collection(conn)
-      #puts ">>> conn: #{conn.object_id}"
       db = conn.db(DB)
-      coll = db.collection(COLLECTION)
+      db.collection(COLLECTION)
     end
     
-    # def init_data(coll)
-    #   doc = {_id: 123, foo: :bar}
-    #   coll.save(doc)
-    # end
-
-    def slow_query_cursor(coll)
-      # init_data(coll)
-      
-      coll.find('$where' => {value: rand(1_000).hash})
+    def cursor(coll)
+      coll.find
     end
   end
   
+  # Clear the Mongo collection
   get '/clear' do
     conn = Mongo::Connection.new
     coll = collection(conn)
@@ -40,6 +32,7 @@ class App < Sinatra::Base
     'done'
   end
   
+  # Insert one million documents in the Mongo collection
   get '/populate' do
     conn = Mongo::Connection.new
     coll = collection(conn)
@@ -50,10 +43,17 @@ class App < Sinatra::Base
     'done'
   end
   
+  # Create new blocking Mongo connection
+  #
+  # ab -n 200 -c 25 http://127.0.0.1:9292/test1
+  #
+  # Time taken for tests:   0.489 seconds
+  # Requests per second:    409.27 [#/sec] (mean)
+  #
   get '/test1' do
     conn = Mongo::Connection.new
     coll = collection(conn)
-    cur = slow_query_cursor(coll)
+    cur = cursor(coll)
     cur.count
 
     conn.close
@@ -61,11 +61,18 @@ class App < Sinatra::Base
     'done'
   end
 
+  # Create new blocking Mongo connection and defer work to a thread
+  #
+  # ab -n 200 -c 25 http://127.0.0.1:9292/test2
+  #
+  # Time taken for tests:   0.345 seconds
+  # Requests per second:    579.79 [#/sec] (mean)
+  #
   aget '/test2' do
     conn = Mongo::Connection.new
     coll = collection(conn)
     op = proc do
-      cur = slow_query_cursor(coll)
+      cur = cursor(coll)
       cur.count
     end
     cback = proc do
@@ -75,32 +82,40 @@ class App < Sinatra::Base
     EM.defer(op, cback)
   end
 
+  # Check out Mongo connection from a connection pool and defer work to a thread
+  #
+  # ab -n 200 -c 25 http://127.0.0.1:9292/test3
+  #
+  # Time taken for tests:   0.251 seconds
+  # Requests per second:    798.11 [#/sec] (mean)
+  #
   aget '/test3' do
     coll = collection(settings.pooled_connection)
     op = proc do
-      cur = slow_query_cursor(coll)
+      cur = cursor(coll)
       cur.count
     end
     cback = proc { body 'done' }
     EM.defer(op, cback)
   end
 
+  # Create new non-blocking Mongo connection
+  #
+  # ab -n 200 -c 25 http://127.0.0.1:9292/test4
+  #
+  # Time taken for tests:   0.220 seconds
+  # Requests per second:    910.52 [#/sec] (mean)
+  #
   aget '/test4' do
     coll = collection(EM::Mongo::Connection.new)
-    cur = slow_query_cursor(coll)
+    cur = cursor(coll)
     resp = cur.count
     resp.callback { body 'done' }
     resp.errback { |e| body e.message }
   end
   
-  # get '/test5' do
-  #   sleep(1)
-  #   'done'
-  # end
-  # 
-  # aget '/test6' do
-  #   op = proc { sleep(1) }
-  #   cback = proc { body 'done' }
-  #   EM.defer(op, cback)
-  # end
+  # TODO
+  #  * test5: Test where checking out a non-blocking Mongo connection from a connection pool
+  #  * test6: test4 wrapped in a fiber
+  #  * test7: test5 wrapped in a fiber
 end
